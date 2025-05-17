@@ -1,273 +1,267 @@
-#!/usr/bin/env python3
-# spotify_cloud_server.py
-import os
-import requests
-import json
-import base64
+import spotipy
+from spotipy.oauth2 import SpotifyOAuth
 import time
+import os
 from flask import Flask, request, jsonify
-from dotenv import load_dotenv
-
-# .env dosyasından hassas bilgileri yükle
-load_dotenv()
 
 app = Flask(__name__)
 
-# Spotify API bilgileri
-CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
-CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
-REFRESH_TOKEN = os.getenv("SPOTIFY_REFRESH_TOKEN")
-DEVICE_ID = os.getenv("SPOTIFY_DEVICE_ID")  # Raspotify cihaz ID'si
+class SpotifyController:
+    """
+    Render.com üzerinde Spotify API kullanarak şarkı çalma ve kontrol etme sınıfı.
+    """
 
-# Spotify API'ları için erişim jetonu alın
-def get_access_token():
-    if not CLIENT_ID or not CLIENT_SECRET or not REFRESH_TOKEN:
-        print("Eksik Spotify API bilgileri")
-        return None
+    def __init__(self):
+        """
+        SpotifyController sınıfının başlatıcı metodu.
+        Environment variables'dan değerleri alır.
+        """
+        # Environment variables'dan değerleri al
+        client_id = os.environ.get('SPOTIFY_CLIENT_ID')
+        client_secret = os.environ.get('SPOTIFY_CLIENT_SECRET')
+        redirect_uri = os.environ.get('SPOTIFY_REDIRECT_URI')
+        username = os.environ.get('SPOTIFY_USERNAME')
         
-    auth_header = base64.b64encode(f"{CLIENT_ID}:{CLIENT_SECRET}".encode()).decode()
-    
-    headers = {
-        "Authorization": f"Basic {auth_header}",
-        "Content-Type": "application/x-www-form-urlencoded"
-    }
-    
-    data = {
-        "grant_type": "refresh_token",
-        "refresh_token": REFRESH_TOKEN
-    }
-    
-    try:
-        response = requests.post("https://accounts.spotify.com/api/token", headers=headers, data=data, timeout=10)
-        
-        if response.status_code == 200:
-            return response.json()["access_token"]
-        else:
-            print(f"Erişim jetonu alınamadı: {response.status_code} - {response.text}")
+        # Değerlerin varlığını kontrol et
+        if not all([client_id, client_secret, redirect_uri, username]):
+            raise ValueError("Spotify environment variables (SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, SPOTIFY_REDIRECT_URI, SPOTIFY_USERNAME) tanımlanmalı!")
+
+        self.username = username
+
+        # Spotify API için yetkilendirme kapsamları
+        scope = "user-read-playback-state,user-modify-playback-state,user-read-currently-playing"
+
+        # Spotify API bağlantısını oluşturma
+        self.sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
+            client_id=client_id,
+            client_secret=client_secret,
+            redirect_uri=redirect_uri,
+            scope=scope,
+            username=username
+        ))
+
+        print("Spotify Controller başlatıldı.")
+
+    def search_track(self, query, limit=5):
+        """
+        Bir şarkıyı Spotify'da arar.
+
+        Args:
+            query (str): Aranacak şarkı adı veya sanatçı
+            limit (int): Döndürülecek sonuç sayısı
+
+        Returns:
+            list: Bulunan şarkıların listesi (şarkı adı, sanatçı, URI)
+        """
+        try:
+            results = self.sp.search(q=query, limit=limit, type='track')
+            tracks = results['tracks']['items']
+
+            if not tracks:
+                print(f"'{query}' için şarkı bulunamadı.")
+                return []
+
+            found_tracks = []
+            for i, track in enumerate(tracks):
+                track_info = {
+                    'index': i + 1,
+                    'name': track['name'],
+                    'artist': track['artists'][0]['name'],
+                    'uri': track['uri'],
+                    'duration_ms': track['duration_ms']
+                }
+                found_tracks.append(track_info)
+                print(f"{i + 1}. {track['name']} - {track['artists'][0]['name']}")
+
+            return found_tracks
+
+        except Exception as e:
+            print(f"Şarkı arama hatası: {e}")
+            return []
+
+    def play_track(self, track_uri=None):
+        """
+        Seçilen şarkıyı çalar.
+
+        Args:
+            track_uri (str): Çalınacak şarkının Spotify URI'si
+        """
+        try:
+            # Aktif cihazları kontrol etme
+            devices = self.sp.devices()
+            if not devices['devices']:
+                print("Aktif Spotify cihazı bulunamadı. Lütfen bir cihazda Spotify'ı açın.")
+                return False
+
+            # İlk aktif cihazı kullanma
+            device_id = devices['devices'][0]['id']
+
+            if track_uri:
+                self.sp.start_playback(device_id=device_id, uris=[track_uri])
+                current_track = self.sp.currently_playing()
+                if current_track and current_track['item']:
+                    print(
+                        f"Şimdi çalıyor: {current_track['item']['name']} - {current_track['item']['artists'][0]['name']}")
+                return True
+            else:
+                print("Çalınacak şarkı seçilmedi.")
+                return False
+
+        except Exception as e:
+            print(f"Şarkı çalma hatası: {e}")
+            return False
+
+    def pause(self):
+        """Çalmakta olan şarkıyı duraklatır."""
+        try:
+            self.sp.pause_playback()
+            print("Müzik duraklatıldı.")
+            return True
+        except Exception as e:
+            print(f"Duraklatma hatası: {e}")
+            return False
+
+    def resume(self):
+        """Duraklatılmış şarkıyı devam ettirir."""
+        try:
+            self.sp.start_playback()
+            print("Müzik devam ediyor.")
+            return True
+        except Exception as e:
+            print(f"Devam ettirme hatası: {e}")
+            return False
+
+    def next_track(self):
+        """Sonraki şarkıya geçer."""
+        try:
+            self.sp.next_track()
+            time.sleep(0.5)  # API güncellemesi için kısa bekleme
+            current_track = self.sp.currently_playing()
+            if current_track and current_track['item']:
+                print(f"Sonraki şarkı: {current_track['item']['name']} - {current_track['item']['artists'][0]['name']}")
+            return True
+        except Exception as e:
+            print(f"Sonraki şarkıya geçme hatası: {e}")
+            return False
+
+    def previous_track(self):
+        """Önceki şarkıya geçer."""
+        try:
+            self.sp.previous_track()
+            time.sleep(0.5)  # API güncellemesi için kısa bekleme
+            current_track = self.sp.currently_playing()
+            if current_track and current_track['item']:
+                print(f"Önceki şarkı: {current_track['item']['name']} - {current_track['item']['artists'][0]['name']}")
+            return True
+        except Exception as e:
+            print(f"Önceki şarkıya geçme hatası: {e}")
+            return False
+
+    def get_currently_playing(self):
+        """
+        Şu anda çalan şarkı bilgisini getirir.
+
+        Returns:
+            dict: Çalan şarkı bilgisi veya None
+        """
+        try:
+            current = self.sp.currently_playing()
+            if current and current['item']:
+                track_info = {
+                    'name': current['item']['name'],
+                    'artist': current['item']['artists'][0]['name'],
+                    'album': current['item']['album']['name'],
+                    'progress_ms': current['progress_ms'],
+                    'duration_ms': current['item']['duration_ms']
+                }
+                print(f"Şu anda çalıyor: {track_info['name']} - {track_info['artist']}")
+                return track_info
+            else:
+                print("Şu anda çalan şarkı yok.")
+                return None
+        except Exception as e:
+            print(f"Çalan şarkı bilgisi hatası: {e}")
             return None
-    except requests.exceptions.RequestException as e:
-        print(f"Token alma hatası: {e}")
-        return None
 
-# Health check endpoint
-@app.route("/", methods=["GET"])
-def health_check():
-    return jsonify({"status": "OK", "message": "Spotify Cloud Server çalışıyor"})
+# Global SpotifyController instance
+spotify_controller = SpotifyController()
 
-# Mevcut kullanılabilir cihazları al
-@app.route("/devices", methods=["GET"])
-def get_devices():
-    access_token = get_access_token()
-    
-    if not access_token:
-        return jsonify({"error": "Erişim jetonu alınamadı"}), 401
-    
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json"
-    }
-    
-    try:
-        response = requests.get("https://api.spotify.com/v1/me/player/devices", headers=headers, timeout=10)
-        
-        if response.status_code == 200:
-            return jsonify(response.json())
-        else:
-            return jsonify({"error": f"Cihazlar alınamadı: {response.status_code} - {response.text}"}), response.status_code
-    except requests.exceptions.RequestException as e:
-        return jsonify({"error": f"İstek hatası: {str(e)}"}), 500
-
-# Şarkı çal
-@app.route("/play", methods=["POST"])
-def play_track():
-    # JSON verisi kontrol
-    if not request.is_json:
-        return jsonify({"error": "Content-Type application/json olmalı"}), 400
-        
-    data = request.json
-    track_uri = data.get("track_uri") if data else None
-    
-    if not track_uri:
-        return jsonify({"error": "track_uri parametresi gerekli"}), 400
-    
-    access_token = get_access_token()
-    
-    if not access_token:
-        return jsonify({"error": "Erişim jetonu alınamadı"}), 401
-    
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json"
-    }
-    
-    # Belirli bir cihazda çalma
-    endpoint = "https://api.spotify.com/v1/me/player/play"
-    if DEVICE_ID:
-        endpoint += f"?device_id={DEVICE_ID}"
-    
-    payload = {
-        "uris": [track_uri]
-    }
-    
-    try:
-        response = requests.put(endpoint, headers=headers, json=payload, timeout=10)
-        
-        if response.status_code in [200, 204]:
-            return jsonify({"success": True, "message": "Şarkı başarıyla çalınıyor"})
-        else:
-            return jsonify({"error": f"Şarkı çalınamadı: {response.status_code} - {response.text}"}), response.status_code
-    except requests.exceptions.RequestException as e:
-        return jsonify({"error": f"İstek hatası: {str(e)}"}), 500
-
-# Şarkı ara
-@app.route("/search", methods=["GET"])
-def search_tracks():
-    query = request.args.get("q")
+# API Endpoints
+@app.route('/search', methods=['POST'])
+def search_track():
+    """Şarkı arama endpoint"""
+    data = request.get_json()
+    query = data.get('query')
+    limit = data.get('limit', 5)
     
     if not query:
-        return jsonify({"error": "q parametresi gerekli"}), 400
+        return jsonify({'error': 'Query parametresi gerekli'}), 400
     
-    access_token = get_access_token()
-    
-    if not access_token:
-        return jsonify({"error": "Erişim jetonu alınamadı"}), 401
-    
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json"
-    }
-    
-    params = {
-        "q": query,
-        "type": "track",
-        "limit": 10
-    }
-    
-    try:
-        response = requests.get("https://api.spotify.com/v1/search", headers=headers, params=params, timeout=10)
-        
-        if response.status_code == 200:
-            return jsonify(response.json())
-        else:
-            return jsonify({"error": f"Arama yapılamadı: {response.status_code} - {response.text}"}), response.status_code
-    except requests.exceptions.RequestException as e:
-        return jsonify({"error": f"İstek hatası: {str(e)}"}), 500
+    tracks = spotify_controller.search_track(query, limit)
+    return jsonify({'tracks': tracks})
 
-# Şu anda çalan şarkıyı durdur
-@app.route("/pause", methods=["POST"])
-def pause_playback():
-    access_token = get_access_token()
+@app.route('/play', methods=['POST'])
+def play_track():
+    """Şarkı çalma endpoint"""
+    data = request.get_json()
+    track_uri = data.get('track_uri')
     
-    if not access_token:
-        return jsonify({"error": "Erişim jetonu alınamadı"}), 401
-    
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json"
-    }
-    
-    endpoint = "https://api.spotify.com/v1/me/player/pause"
-    if DEVICE_ID:
-        endpoint += f"?device_id={DEVICE_ID}"
-    
-    try:
-        response = requests.put(endpoint, headers=headers, timeout=10)
-        
-        if response.status_code in [200, 204]:
-            return jsonify({"success": True, "message": "Çalma duraklatıldı"})
-        else:
-            return jsonify({"error": f"Çalma duraklatılamadı: {response.status_code} - {response.text}"}), response.status_code
-    except requests.exceptions.RequestException as e:
-        return jsonify({"error": f"İstek hatası: {str(e)}"}), 500
+    success = spotify_controller.play_track(track_uri)
+    if success:
+        return jsonify({'message': 'Şarkı çalmaya başladı'})
+    else:
+        return jsonify({'error': 'Şarkı çalınamadı'}), 400
 
-# Şu anda çalan şarkıyı devam ettir
-@app.route("/resume", methods=["POST"])
-def resume_playback():
-    access_token = get_access_token()
-    
-    if not access_token:
-        return jsonify({"error": "Erişim jetonu alınamadı"}), 401
-    
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json"
-    }
-    
-    endpoint = "https://api.spotify.com/v1/me/player/play"
-    if DEVICE_ID:
-        endpoint += f"?device_id={DEVICE_ID}"
-    
-    try:
-        response = requests.put(endpoint, headers=headers, timeout=10)
-        
-        if response.status_code in [200, 204]:
-            return jsonify({"success": True, "message": "Çalma devam ediyor"})
-        else:
-            return jsonify({"error": f"Çalma devam ettirilemedi: {response.status_code} - {response.text}"}), response.status_code
-    except requests.exceptions.RequestException as e:
-        return jsonify({"error": f"İstek hatası: {str(e)}"}), 500
+@app.route('/pause', methods=['POST'])
+def pause_track():
+    """Şarkı duraklat endpoint"""
+    success = spotify_controller.pause()
+    if success:
+        return jsonify({'message': 'Müzik duraklatıldı'})
+    else:
+        return jsonify({'error': 'Müzik duraklatılamadı'}), 400
 
-# Şu anda çalan şarkı bilgisini al
-@app.route("/now-playing", methods=["GET"])
-def get_now_playing():
-    access_token = get_access_token()
-    
-    if not access_token:
-        return jsonify({"error": "Erişim jetonu alınamadı"}), 401
-    
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json"
-    }
-    
-    try:
-        response = requests.get("https://api.spotify.com/v1/me/player", headers=headers, timeout=10)
-        
-        if response.status_code == 200:
-            return jsonify(response.json())
-        elif response.status_code == 204:
-            return jsonify({"message": "Şu anda hiçbir şey çalmıyor"})
-        else:
-            return jsonify({"error": f"Çalan şarkı bilgisi alınamadı: {response.status_code} - {response.text}"}), response.status_code
-    except requests.exceptions.RequestException as e:
-        return jsonify({"error": f"İstek hatası: {str(e)}"}), 500
+@app.route('/resume', methods=['POST'])
+def resume_track():
+    """Şarkı devam ettir endpoint"""
+    success = spotify_controller.resume()
+    if success:
+        return jsonify({'message': 'Müzik devam ediyor'})
+    else:
+        return jsonify({'error': 'Müzik devam ettirilemedi'}), 400
 
-# Ses seviyesi ayarlama
-@app.route("/volume", methods=["POST"])
-def set_volume():
-    if not request.is_json:
-        return jsonify({"error": "Content-Type application/json olmalı"}), 400
-        
-    data = request.json
-    volume = data.get("volume") if data else None
-    
-    if volume is None or not isinstance(volume, int) or not (0 <= volume <= 100):
-        return jsonify({"error": "volume parametresi 0-100 arası integer olmalı"}), 400
-    
-    access_token = get_access_token()
-    
-    if not access_token:
-        return jsonify({"error": "Erişim jetonu alınamadı"}), 401
-    
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json"
-    }
-    
-    endpoint = f"https://api.spotify.com/v1/me/player/volume?volume_percent={volume}"
-    if DEVICE_ID:
-        endpoint += f"&device_id={DEVICE_ID}"
-    
-    try:
-        response = requests.put(endpoint, headers=headers, timeout=10)
-        
-        if response.status_code in [200, 204]:
-            return jsonify({"success": True, "message": f"Ses seviyesi {volume}% olarak ayarlandı"})
-        else:
-            return jsonify({"error": f"Ses seviyesi ayarlanamadı: {response.status_code} - {response.text}"}), response.status_code
-    except requests.exceptions.RequestException as e:
-        return jsonify({"error": f"İstek hatası: {str(e)}"}), 500
+@app.route('/next', methods=['POST'])
+def next_track():
+    """Sonraki şarkı endpoint"""
+    success = spotify_controller.next_track()
+    if success:
+        return jsonify({'message': 'Sonraki şarkıya geçildi'})
+    else:
+        return jsonify({'error': 'Sonraki şarkıya geçilemedi'}), 400
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    app.run(host="0.0.0.0", port=port)
+@app.route('/previous', methods=['POST'])
+def previous_track():
+    """Önceki şarkı endpoint"""
+    success = spotify_controller.previous_track()
+    if success:
+        return jsonify({'message': 'Önceki şarkıya geçildi'})
+    else:
+        return jsonify({'error': 'Önceki şarkıya geçilemedi'}), 400
+
+@app.route('/current', methods=['GET'])
+def current_track():
+    """Şu anki şarkı endpoint"""
+    track_info = spotify_controller.get_currently_playing()
+    if track_info:
+        return jsonify({'current_track': track_info})
+    else:
+        return jsonify({'message': 'Şu anda çalan şarkı yok'}), 404
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health check endpoint"""
+    return jsonify({'status': 'OK', 'message': 'Spotify Controller çalışıyor'})
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
